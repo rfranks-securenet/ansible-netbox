@@ -1,0 +1,222 @@
+---
+- hosts: all
+  become: yes
+
+  tasks:
+    - name: EPEL Repo
+      yum:
+        name: epel-release
+        state: present
+    
+    - name: Yum Update
+      yum:
+        name: '*'
+        state: latest
+
+    - name: Ansible python requirements
+      yum:
+        name:
+          - python-psycopg2
+          - python-setuptools
+          - python-ipaddress
+          - python-pip
+          - libsemanage-python
+        state: present
+
+    - name: Install pexpect
+      pip:
+        name: pexpect
+    
+    - name: Mask postgres in base
+      lineinfile:
+        path: /etc/yum.repos.d/CentOS-Base.repo
+        line: 'exclude: postgresql*'
+        insertafter: '\[base\]'
+        firstmatch: yes
+
+    - name: Mask postgres in updates
+      lineinfile:
+        path: /etc/yum.repos.d/CentOS-Base.repo
+        line: 'exclude: postgresql*'
+        insertafter: '\[updates\]'
+        firstmatch: yes
+        
+    - name: Copy PGDG GPG key
+      copy:
+        src: files/RPM-GPG-KEY-PGDG-10
+        dest: /etc/pki/rpm-gpg/RPM-GPG-KEY-PGDG-10
+
+    - name: Add PGDG repo
+      yum_repository:
+        name: pgdg-10-centos
+        description: PostgreSQL 10 - x86_64
+        baseurl: "https://download.postgresql.org/pub/repos/yum/10/redhat/rhel-7-x86_64"
+        repo_gpgcheck: no
+        gpgkey: 'file:///etc/pki/rpm-gpg/RPM-GPG-KEY-PGDG-10'
+
+    - name: Install Postgres
+      yum:
+        name: postgresql10-server
+        state: latest
+
+    - name: Postgres setup
+      command: /usr/pgsql-10/bin/postgresql-10-setup initdb
+      args:
+        creates: /var/lib/pgsql/10/data/PG_VERSION
+    
+
+    - name: Postgres Auth (v6)
+      postgresql_pg_hba:
+        dest: /var/lib/pgsql/10/data/pg_hba.conf
+        contype: host
+        users: netbox
+        source: ::1
+        databases: netbox
+        method: md5
+
+    - name: Postgres Auth (v4)
+      postgresql_pg_hba:
+        dest: /var/lib/pgsql/10/data/pg_hba.conf
+        contype: host
+        users: netbox
+        source: 127.0.0.1/32
+        databases: netbox
+        method: md5
+
+    - name: Start Postgres
+      systemd:
+        name: postgresql-10
+        state: started
+        enabled: yes
+
+    - name: Create postgres user
+      postgresql_user:
+        name: netbox
+        password: netboxpass
+      become_user: postgres
+
+    - name: Create postgres db
+      postgresql_db:
+        name: netbox
+        owner: netbox
+      become_user: postgres
+    
+    - name: Postgres Privs
+      postgresql_privs:
+        database: netbox
+        roles: netbox
+        privs: ALL
+        state: present
+        type: table
+        objs: ALL_IN_SCHEMA
+      become_user: postgres
+    
+    - name: Install required tools
+      yum:
+        name:
+          - gcc
+          - python3
+          - libxml2-devel 
+          - libxslt-devel 
+          - libffi-devel 
+          - graphviz 
+          - openssl-devel 
+          - redhat-rpm-config 
+          - redis
+        state: latest
+    
+    - name: Create Netbox directory
+      file:
+        path: /opt/netbox
+        state: directory
+    
+    - name: Download netbox
+      get_url:
+        url: https://github.com/netbox-community/netbox/archive/v2.6.7.tar.gz
+        dest: /tmp/netbox-2.6.7.tar.gz
+    
+    - name: Create code directory
+      file:
+        path: /opt/netbox/code
+        state: directory
+
+    - name: Extract app
+      unarchive:
+        src: /tmp/netbox-2.6.7.tar.gz
+        dest: /opt/netbox/code
+        remote_src: yes
+        extra_opts:
+          - --strip-components
+          - '1'
+
+    - name: Install requirements
+      pip:
+        # executable: pip3
+        requirements: /opt/netbox/code/requirements.txt
+        virtualenv: /opt/netbox/virtualenv
+        virtualenv_command: /bin/python3 -m venv
+    
+    - name: Copy config
+      copy:
+        src: files/configuration.py
+        dest: /opt/netbox/code/netbox/netbox/configuration.py
+    
+    - name: Database Migrations
+      command:
+        cmd: /opt/netbox/virtualenv/bin/python manage.py migrate
+        chdir: /opt/netbox/code/netbox/
+    
+    - name: Create Admin user
+      expect:
+        command: /opt/netbox/virtualenv/bin/python manage.py createsuperuser
+        chdir: /opt/netbox/code/netbox/
+        responses:
+          Username: "admin"
+          Email.*: "admin@netbox.test"
+          Password.*: "password"
+
+    - name: Collect static files
+      command:
+        cmd: /opt/netbox/virtualenv/bin/python manage.py collectstatic --no-input
+        chdir: /opt/netbox/code/netbox/
+    
+    - name: Netbox Service
+      copy:
+        src: files/netbox.service
+        dest: /etc/systemd/system/netbox.service
+    
+    - name: Start Netbox
+      systemd:
+        daemon_reload: yes
+        name: netbox
+        state: started
+        enabled: yes
+    
+    - name: Install Nginx
+      yum:
+        name: nginx
+        state: latest
+    
+    - name: Nginx Config
+      copy:
+        src: files/nginx.conf
+        dest: /etc/nginx/nginx.conf
+    
+    - name: Restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+        enabled: yes
+    
+    - name: Nginx firewall rules
+      firewalld:
+        service: http
+        state: enabled
+        permanent: yes
+        immediate: yes
+    
+    - name: SELinux httpd network connect boolean
+      seboolean:
+        name: httpd_can_network_connect
+        persistent: yes
+        state: yes

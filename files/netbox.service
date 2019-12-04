@@ -1,0 +1,8 @@
+[Unit]
+Description=Netbox
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/netbox/code/netbox/
+ExecStart=/opt/netbox/virtualenv/bin/python manage.py runserver 127.0.0.1:8000 --insecure
